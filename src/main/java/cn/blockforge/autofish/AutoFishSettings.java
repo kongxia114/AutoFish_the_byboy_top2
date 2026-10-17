@@ -16,11 +16,8 @@ import net.minecraft.text.Text;
  * 手写 GUI 就得为每个版本各写一份。Cloth Config 自己按 MC 版本发布，
  * 这些差异由它吸收，本模组只出「配置项定义」。
  *
- * <p>界面分工沿用原来的约定：
- * <ul>
- *   <li>基本选项：只放开关；</li>
- *   <li>高级选项：只放精度数值（带滑条）。</li>
- * </ul>
+ * <p><b>单页两个小节</b>：不再用两个 ConfigCategory（那会变成顶部的标签页），
+ * 而是同一个分类里用文字分隔，滚一页就看完——基本区只有开关，高级区只有精度数值。
  */
 public final class AutoFishSettings {
     private AutoFishSettings() {
@@ -29,7 +26,7 @@ public final class AutoFishSettings {
     /** 打开设置页。Cloth Config 没装时给一条聊天提示，而不是把游戏搞崩。 */
     public static void open(MinecraftClient client) {
         try {
-            client.setScreen(build(client));
+            client.setScreen(buildScreen(client.currentScreen));
         } catch (Throwable missingClothConfig) {
             // 典型情况：玩家没装 Cloth Config，加载本类时抛 NoClassDefFoundError
             if (client.player != null) {
@@ -39,43 +36,57 @@ public final class AutoFishSettings {
         }
     }
 
-    private static Screen build(MinecraftClient client) {
+    /** 给 Mod Menu 的「配置」按钮用：只需要父屏幕，不依赖 client 当前状态。 */
+    public static Screen buildScreen(Screen parent) {
         ConfigBuilder builder = ConfigBuilder.create()
-            .setParentScreen(client.currentScreen)
+            .setParentScreen(parent)
             .setTitle(Text.literal("自动钓鱼设置"))
             .setSavingRunnable(AutoFishController::saveConfig);
 
         ConfigEntryBuilder entries = builder.entryBuilder();
+        ConfigCategory page = builder.getOrCreateCategory(Text.literal("设置"));
 
-        ConfigCategory basic = builder.getOrCreateCategory(Text.literal("基本选项"));
-        basic.addEntry(entries.startBooleanToggle(
+        // ---------------- 基本选项：只放开关 ----------------
+        page.addEntry(entries.startTextDescription(Text.literal("—— 基本选项 ——")).build());
+        page.addEntry(entries.startBooleanToggle(
                 Text.literal("启用自动钓鱼"), AutoFishController.isEnabled())
             .setDefaultValue(false)
             .setSaveConsumer(AutoFishController::setEnabled)
             .build());
-        basic.addEntry(entries.startBooleanToggle(
+        page.addEntry(entries.startBooleanToggle(
                 Text.literal("溅水花触发咬钩"), AutoFishController.splashTriggerEnabled())
             .setDefaultValue(true)
             .setSaveConsumer(AutoFishController::setSplashTriggerEnabled)
             .build());
-        basic.addEntry(entries.startBooleanToggle(
+        page.addEntry(entries.startBooleanToggle(
                 Text.literal("多人游戏检测"), AutoFishController.multiplayerMode())
             .setDefaultValue(false)
             .setSaveConsumer(AutoFishController::setMultiplayerMode)
             .build());
 
-        ConfigCategory advanced = builder.getOrCreateCategory(Text.literal("高级选项"));
-        advanced.addEntry(entries.startIntSlider(
+        // ---------------- 高级选项：只放精度数值 ----------------
+        page.addEntry(entries.startTextDescription(Text.literal("—— 高级选项 ——")).build());
+        page.addEntry(entries.startStrField(
+                Text.literal("目标颜色（#RRGGBB）"), AutoFishController.targetRgbHex())
+            .setDefaultValue("#34ED53")
+            .setSaveConsumer(AutoFishController::setTargetRgbHex)
+            .build());
+        page.addEntry(entries.startIntSlider(
+                Text.literal("颜色容差（±）"), AutoFishController.targetTol(), 0, 80)
+            .setDefaultValue(24)
+            .setSaveConsumer(AutoFishController::setTargetTol)
+            .build());
+        page.addEntry(entries.startIntSlider(
                 Text.literal("收线预判（毫秒）"), AutoFishController.leadMs(), 0, 200)
             .setDefaultValue(40)
             .setSaveConsumer(AutoFishController::setLeadMs)
             .build());
-        advanced.addEntry(entries.startIntSlider(
+        page.addEntry(entries.startIntSlider(
                 Text.literal("重新投掷延迟（毫秒）"), AutoFishController.recastDelayMs(), 500, 5000)
             .setDefaultValue(1500)
             .setSaveConsumer(AutoFishController::setRecastDelayMs)
             .build());
-        advanced.addEntry(entries.startIntSlider(
+        page.addEntry(entries.startIntSlider(
                 Text.literal("随机重投延迟（百分之）"), AutoFishController.recastJitterPercent(), 0, 100)
             .setDefaultValue(0)
             .setSaveConsumer(AutoFishController::setRecastJitterPercent)

@@ -58,11 +58,17 @@ public final class AutoFishHud {
             AutoFishController.splashSeenCount(),
             AutoFishController.splashReelCount(),
             AutoFishController.leadMs()));
+        // 调「目标颜色 / 颜色容差」时唯一的参照：这一行告诉你指针底下实际读到的是什么色
+        Text line3 = Text.literal(String.format("中心 %s · 目标 %s · 容差 ±%d",
+            hex(AutoFishController.pointerCenterRgb()),
+            AutoFishController.targetRgbHex(),
+            AutoFishController.targetTol()));
 
         int widest = client.textRenderer.getWidth(state);
         widest = Math.max(widest, client.textRenderer.getWidth(hint));
         widest = Math.max(widest, client.textRenderer.getWidth(line1));
         widest = Math.max(widest, client.textRenderer.getWidth(line2));
+        widest = Math.max(widest, client.textRenderer.getWidth(line3));
         int x = client.getWindow().getScaledWidth() - widest - 6;
         int y = 6;
 
@@ -70,5 +76,10 @@ public final class AutoFishHud {
         context.drawTextWithShadow(client.textRenderer, hint, x, y + 11, COLOR_HINT);
         context.drawTextWithShadow(client.textRenderer, line1, x, y + 22, COLOR_STATS);
         context.drawTextWithShadow(client.textRenderer, line2, x, y + 33, COLOR_STATS);
+        context.drawTextWithShadow(client.textRenderer, line3, x, y + 44, COLOR_STATS);
+    }
+
+    private static String hex(int rgb) {
+        return String.format("#%06X", rgb & 0xFFFFFF);
     }
 }

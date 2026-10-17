@@ -178,13 +178,18 @@ public final class AutoFishController {
 
     // -----------------------------------------------------------------------
     // 指针追踪与提前量：随机速度下命中率的关键
-    //   原来"找指针"和"判是否压绿"耦合在同一个 for 循环里，指针找到的那一刻
-    //   就顺带判完，拿不到指针坐标，也就无从估计速度。这里拆成两步：
-    //   findPointerCenter 只负责定位，shouldReelNow 负责拿速度和绿段边界做判定。
+    //   判定不再"先求绿段边界、再比区间"——指针压在绿段正中间时，指针自己的像素
+    //   会把绿段切成左右两段；取最长的一段之后，指针中心恰好落在两段之间的缝里，
+    //   于是出现"明明在绿里却判定失败"（绿在两侧就必失败）。
+    //   改成沿速度方向直接探测：当前帧读指针中心那一列的颜色，提前量则从指针中心
+    //   沿速度方向逐像素前探。任意段数、任意布局都成立，也不再需要求边界。
     // -----------------------------------------------------------------------
-    /** 本帧目标绿色段的左右边界（含端点）；<0 表示这一帧没定位到。 */
-    private static int greenZoneStart = -1;
-    private static int greenZoneEnd = -1;
+    /** 目标色（默认取实测的条体绿 #34ED53）：判定只认它，容差 ±targetTol。 */
+    private static int targetRgb = 0x34ED53;
+    /** 逐通道容差：吃掉同段深浅与缩放插值，又挡住与相邻色相之间的边界混色。 */
+    private static int targetTol = 24;
+    /** 最近一次读到的指针中心列颜色：调目标色与容差时唯一的参照，HUD 里显示。 */
+    private static int pointerCenterRgb;
     /** 最近一次定位到的指针中心列。 */
     private static int pointerX = -1;
     private static long pointerSeenNs;
@@ -303,6 +308,48 @@ public final class AutoFishController {
         splashTriggerEnabled = on;
     }
 
+    public static int targetTol() {
+        return targetTol;
+    }
+
+    /** 容差范围 0~80：太小会漏判（同段深浅吃不下），太大容易和相邻色相撞车。 */
+    public static void setTargetTol(int tol) {
+        targetTol = Math.max(0, Math.min(80, tol));
+    }
+
+    public static int targetRgb() {
+        return targetRgb;
+    }
+
+    public static String targetRgbHex() {
+        return String.format("#%06X", targetRgb & 0xFFFFFF);
+    }
+
+    /** 解析 #RRGGBB 形式；格式不对就保持原值并返回 false。 */
+    public static boolean setTargetRgbHex(String hex) {
+        if (hex == null) {
+            return false;
+        }
+        String s = hex.trim();
+        if (s.startsWith("#")) {
+            s = s.substring(1);
+        }
+        if (s.length() != 6) {
+            return false;
+        }
+        try {
+            targetRgb = Integer.parseInt(s, 16) & 0xFFFFFF;
+            return true;
+        } catch (NumberFormatException bad) {
+            return false;
+        }
+    }
+
+    /** 最近一次读到的指针中心列颜色（0 = 还没读到 / 区域外）。 */
+    public static int pointerCenterRgb() {
+        return pointerCenterRgb;
+    }
+
     public static boolean multiplayerMode() {
         return multiplayerMode;
     }
@@ -337,6 +384,11 @@ public final class AutoFishController {
         if (multiplayer != null) {
             multiplayerMode = Boolean.parseBoolean(multiplayer.trim());
         }
+        String targetHex = props.getProperty("target_rgb");
+        if (targetHex != null) {
+            setTargetRgbHex(targetHex);
+        }
+        targetTol = readInt(props, "target_tol", targetTol, 0, 80);
     }
 
     /** 把当前参数写回配置文件；写失败就算了，功能照常，只是不持久化。 */
@@ -351,6 +403,8 @@ public final class AutoFishController {
         props.setProperty("recast_jitter_percent", String.valueOf(recastJitterPercent));
         props.setProperty("splash_trigger", String.valueOf(splashTriggerEnabled));
         props.setProperty("multiplayer_mode", String.valueOf(multiplayerMode));
+        props.setProperty("target_rgb", targetRgbHex());
+        props.setProperty("target_tol", String.valueOf(targetTol));
         try {
             Files.createDirectories(path.getParent());
             try (OutputStream out = Files.newOutputStream(path)) {
@@ -407,9 +461,7 @@ public final class AutoFishController {
         splashArmed = true;
         splashSeenCount = 0;
         splashReelCount = 0;
-        // 新一轮钓鱼：指针追踪与绿段几何都重新建立，免得带到上一竿的残留状态
-        greenZoneStart = -1;
-        greenZoneEnd = -1;
+        // 新一轮钓鱼：指针追踪重新建立，免得带到上一竿的残留状态
         pointerX = -1;
         pointerSeenNs = 0L;
         pointerVx = 0.0;
@@ -783,7 +835,6 @@ public final class AutoFishController {
                 barSeenThisScan = true;
                 barSeenCount++;
             }
-            locateGreenZone(cachedRunStart, cachedRunEnd, cachedTop, cachedScale, width, height);
             return matchesPointerOnGreen(cachedRunStart, cachedRunEnd, cachedTop, cachedScale, width, height);
         }
         if (++cacheMissStreak >= ROI_MISS_LIMIT) {
@@ -881,7 +932,6 @@ public final class AutoFishController {
                         // 第一个复核通过的候选几何进缓存，之后走逐帧快通道。
                         rememberBarGeometry(runStart, runEnd, top, scale, width, height);
                     }
-                    locateGreenZone(runStart, runEnd, top, scale, width, height);
                     if (matchesPointerOnGreen(runStart, runEnd, top, scale, width, height)) {
                         // 命中指针的候选最贴近真实条顶，缓存以它为准。
                         rememberBarGeometry(runStart, runEnd, top, scale, width, height);
@@ -958,7 +1008,7 @@ public final class AutoFishController {
             return false;
         }
         trackPointer(center);
-        return shouldReelNow();
+        return shouldReelNow(runStart, runEnd, top, scale, width, height);
     }
 
     /**
@@ -1010,70 +1060,77 @@ public final class AutoFishController {
     }
 
     /**
-     * 收线判定核心：不再只认"这一帧看见指针在绿里"，而是按当前速度把指针外推到
-     * 这次点击真正生效的时刻，再看外推位置是否压绿。
+     * 收线判定核心：沿速度方向探测目标色，不再依赖"绿段边界"。
      *
-     * <p>随机速度下这是唯一能救命中率的做法：指针快的时候（一次采样就移动十几到
-     * 二十几像素）等真正看见它进绿段再点，点击落地时它早跑出去了；慢的时候外推量
-     * 趋近于零，行为自然退化成"看见就点"，不会比原来更差。
-     *
-     * <p>已经在绿段里就立刻点，不再画蛇添足地外推——外推只用于"尚未进入但在到达前
-     * 会被点击命中"的那种提前量。
+     * <ol>
+     *   <li><b>当前帧</b>：指针中心那一列透出的就是条体底色，直接拿它跟目标色比。
+     *       指针把绿段劈成两半也不影响——我们看的不是"段"，是"指针底下这一列"。</li>
+     *   <li><b>提前量</b>：从指针中心沿当前速度方向逐像素前探一个 lead 窗口的距离，
+     *       路上撞到目标色就提前点下去。方向天然正确，反向瞬间不会再误判；
+     *       段数、段宽、布局也全都不用关心。</li>
+     * </ol>
      */
-    private static boolean shouldReelNow() {
-        if (greenZoneStart < 0 || pointerX < 0) {
+    private static boolean shouldReelNow(int runStart, int runEnd, int top, float scale, int width, int height) {
+        if (pointerX < 0 || regionWidth <= 0) {
             return false;
         }
-        if (pointerX >= greenZoneStart && pointerX <= greenZoneEnd) {
+        int gapY = top + (int) Math.floor(4.5F * scale);
+
+        // ① 当前帧：指针中心列
+        pointerCenterRgb = pixel(pointerX, gapY, width, height);
+        if (isTargetColorAt(pointerX, gapY, width, height)) {
             hitDecisionCount++;
             return true;
         }
+
+        // ② 提前量：沿速度方向前探
         if (leadMs <= 0 || pointerVx == 0.0) {
             return false;
         }
-        double dtMs = (System.nanoTime() - pointerSeenNs) / 1_000_000.0 + leadMs;
-        double predicted = pointerX + pointerVx * dtMs;
-        if (predicted >= greenZoneStart && predicted <= greenZoneEnd) {
-            hitDecisionCount++;
-            predictedHitCount++;
-            return true;
+        double aheadPx = Math.abs(pointerVx)
+            * (leadMs + (System.nanoTime() - pointerSeenNs) / 1_000_000.0);
+        int steps = (int) Math.round(Math.min(aheadPx, 256.0));
+        if (steps <= 0) {
+            return false;
+        }
+        int dir = pointerVx > 0.0 ? 1 : -1;
+        for (int i = 1; i <= steps; i++) {
+            int x = pointerX + dir * i;
+            if (x < runStart || x > runEnd) {
+                break; // 走出条体范围就别再探了
+            }
+            if (isTargetColorAt(x, gapY, width, height)) {
+                hitDecisionCount++;
+                predictedHitCount++;
+                return true;
+            }
         }
         return false;
     }
 
     /**
-     * 找出本帧目标绿色段的左右边界。
+     * 目标色判定：精确色 ± 容差。
      *
-     * <p>采样行走颜色行正中（指针第 7 行透明缝正好落在那里），所以指针压住的那几列
-     * 也能透出真实底色，不需要把指针宽度从绿段里剔掉——这正是按"绿段实际边界"判定、
-     * 而不是按固定像素窗口判定的好处：绿段只有 20px 宽时，固定 ±1.5·scale 的窗口
-     * 比绿段本身还宽，等于指边擦过就算中。
+     * <p>用精确色而不是色相分桶，是因为相邻色相会互相串桶（橙 #FB9E49 与黄 #FBC94E
+     * 只差一点）；但同一个颜色的段内有 2~3 档深浅（绿有 #34ED53 / #2EEE53 等），
+     * 所以必须留容差。实测：同段深浅差 ≤10，与相邻色相的边界混色差 30~50，
+     * 相邻色相差 ≥80 —— 取 24 正好吃下前者、挡住后两者。
      */
-    private static void locateGreenZone(int runStart, int runEnd, int top, float scale, int width, int height) {
-        int gapY = top + (int) Math.floor(4.5F * scale);
-        int bestStart = -1;
-        int bestEnd = -1;
-        int currentStart = -1;
-        for (int x = runStart; x <= runEnd; x++) {
-            if (bandKind(x, gapY, width, height) == KIND_GREEN) {
-                if (currentStart < 0) {
-                    currentStart = x;
-                }
-            } else if (currentStart >= 0) {
-                // 取最长的连续绿段：彩虹条里可能不止一段绿
-                if (bestStart < 0 || (x - 1 - currentStart) > (bestEnd - bestStart)) {
-                    bestStart = currentStart;
-                    bestEnd = x - 1;
-                }
-                currentStart = -1;
-            }
+    private static boolean isTargetColorAt(int x, int gapY, int width, int height) {
+        int rgb = pixel(x, gapY, width, height);
+        if (rgb == 0) {
+            return false; // 读回区域之外
         }
-        if (currentStart >= 0 && (bestStart < 0 || (runEnd - currentStart) > (bestEnd - bestStart))) {
-            bestStart = currentStart;
-            bestEnd = runEnd;
+        int tr = (targetRgb >>> 16) & 0xFF;
+        int tg = (targetRgb >>> 8) & 0xFF;
+        int tb = targetRgb & 0xFF;
+        if (Math.abs(((rgb >>> 16) & 0xFF) - tr) <= targetTol
+            && Math.abs(((rgb >>> 8) & 0xFF) - tg) <= targetTol
+            && Math.abs((rgb & 0xFF) - tb) <= targetTol) {
+            return true;
         }
-        greenZoneStart = bestStart;
-        greenZoneEnd = bestEnd;
+        // 兜底：资源包 / 光影把颜色整体挪走时，退回首色相桶判定（不比原来更差）
+        return bandKind(rgb) == KIND_GREEN;
     }
 
     /** 5×15 指针贴图逐格匹配：不透明 texel 取格心采样，≥90% 颜色对上才算指针。 */
