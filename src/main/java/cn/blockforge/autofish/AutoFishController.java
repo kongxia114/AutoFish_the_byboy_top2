@@ -637,6 +637,17 @@ public final class AutoFishController {
      * 由 GameRenderer.render 的 HEAD 注入逐帧驱动：读上一帧画面做识别与自动收线。
      * 收线必须比游戏刻更频繁——指针扫得快时，20Hz 采样会整段穿过绿色区。
      */
+    /**
+     * 只有"确实在钓鱼"时才允许按右键。
+     *
+     * <p>原版 {@code FishingRodItem.use} 是二义的：<b>有浮漂就收线、没有浮漂就抛竿</b>。
+     * 所以任何一次误触的 {@code interactItem} 都会变成"莫名其妙又抛了一竿"。
+     * 判断依据就是这两条：要么屏上有我们自己的浮漂，要么钓竿正处于使用中。
+     */
+    private static boolean canInteract(PlayerEntity player, FishingBobberEntity hook) {
+        return hook != null || player.isUsingItem();
+    }
+
     public static void frame(MinecraftClient client) {
         if (!enabled) {
             return;
@@ -675,10 +686,12 @@ public final class AutoFishController {
             player.getX(), player.getY(), player.getZ(),
             hook == null ? 0.0 : hook.getX(), hook == null ? 0.0 : hook.getY(), hook == null ? 0.0 : hook.getZ(),
             now)) {
-            client.interactionManager.interactItem(player, rodHand);
-            nextCastAt = now + recastDelayNanos();
-            lastReelReason = 1;
-            lastReelReasonAtNs = now;
+            if (canInteract(player, hook)) {
+                client.interactionManager.interactItem(player, rodHand);
+                nextCastAt = now + recastDelayNanos();
+                lastReelReason = 1;
+                lastReelReasonAtNs = now;
+            }
         }
 
         // 命中绿色段：收线。按住钓竿走原版松开路径，否则走原版按下右键路径。
@@ -689,7 +702,7 @@ public final class AutoFishController {
                     client.interactionManager.stopUsingItem(player);
                     clicked = true;
                 }
-            } else {
+            } else if (canInteract(player, hook)) {
                 client.interactionManager.interactItem(player, rodHand);
                 clicked = true;
             }
