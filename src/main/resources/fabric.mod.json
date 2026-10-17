@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
-  "id": "tidin_autofish",
+  "id": "tidin_ctrl_ctrl_ctrl_ctr",
   "version": "${version}",
-  "name": "Ctrl 自动钓鱼",
-  "description": "服务器自定义钓鱼条的自动收线：识别屏幕上的鱼条与指针，指针压到绿色段就按右键收线；溅水花字幕出现时自动咬钩，收线后按设定节奏自动重抛。指针速度随机，用横向速度外推补偿延迟。设置页需要 Cloth Config API。",
+  "name": "Ctrl 功能菜单",
+  "description": "按一次 Ctrl 呼出居中的半透明黑色「功能」大面板，再按一次或按 Esc 关闭；面板分「工具 / 世界 / 设置」三个标签页，工具页含坐标复制、HUD 开关与「旋转 / 角色旋转 / 抬臂旋转」实时自转，零配置、装上即用。",
   "authors": [
     "BlockForge"
   ],
@@ -11,23 +11,16 @@
   "environment": "client",
   "entrypoints": {
     "client": [
-      "cn.blockforge.autofish.AutoFishMod"
-    ],
-    "modmenu": [
-      "cn.blockforge.autofish.ModMenuIntegration"
+      "cn.blockforge.generated.tidinctrlctrlctrlctr.FunctionMenuMod"
     ]
   },
   "mixins": [
-    "tidin_autofish.mixins.json"
+    "tidin_ctrl_ctrl_ctrl_ctr.mixins.json"
   ],
   "depends": {
     "fabricloader": ">=0.16.14",
     "minecraft": "${minecraft_dep}",
     "java": ">=17",
     "fabric-api": "*"
-  },
-  "recommends": {
-    "cloth-config": "*",
-    "modmenu": "*"
   }
 }
