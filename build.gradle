@@ -53,6 +53,11 @@ repositories {
         name = 'TerraformersMC'
         url = 'https://maven.terraformersmc.com/releases'
     }
+    maven {
+        // Mod Menu 的传递依赖 placeholder-api 托管在这里（Patbox / Nucleoid）
+        name = 'Nucleoid'
+        url = 'https://maven.nucleoid.xyz/'
+    }
     mavenCentral()
 }
 
@@ -66,8 +71,12 @@ dependencies {
     // Cloth Config 只用于设置页：modApi = 编译期可见，运行期由玩家自己安装
     modApi "me.shedaniel.cloth:cloth-config-fabric:${profile.cloth}"
 
-    // Mod Menu 只提供「配置」按钮的接入点：modCompileOnly = 编译期需要，运行期没有也不影响
-    modCompileOnly "com.terraformersmc:modmenu:${profile.modmenu}"
+    // Mod Menu 只提供「配置」按钮的接入点：modCompileOnly = 编译期需要，运行期没有也不影响。
+    // transitive = false：Mod Menu 的 POM 里带了个 placeholder-api（托管在 Patbox 的
+    // Nucleoid 仓库），我们只用它的 api 接口、不用那些传递依赖，关掉省得再去配仓库。
+    modCompileOnly("com.terraformersmc:modmenu:${profile.modmenu}") {
+        transitive = false
+    }
 }
 
 // 把版本号与目标 MC 范围填进 fabric.mod.json 的占位符
