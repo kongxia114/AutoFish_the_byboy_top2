@@ -11,6 +11,7 @@ def MC_PROFILES = [
                 loader: '0.16.14',
                 api  : '0.92.12+1.20.1',
                 cloth: '11.1.106',
+                modmenu: '7.2.2',
                 dep  : '~1.20.1',
         ],
         '1.20.4': [
@@ -18,6 +19,7 @@ def MC_PROFILES = [
                 loader: '0.16.14',
                 api  : '0.97.2+1.20.4',
                 cloth: '13.0.121',
+                modmenu: '9.2.0',
                 // 1.20.2~1.20.4 同代 API，共用一个 jar
                 dep  : '>=1.20.2 <1.21',
         ],
@@ -46,6 +48,11 @@ repositories {
         name = 'Shedaniel'
         url = 'https://maven.shedaniel.me/'
     }
+    maven {
+        // Mod Menu（只用于在模组列表里显示「配置」按钮）
+        name = 'TerraformersMC'
+        url = 'https://maven.terraformersmc.com/releases'
+    }
     mavenCentral()
 }
 
@@ -58,6 +65,9 @@ dependencies {
 
     // Cloth Config 只用于设置页：modApi = 编译期可见，运行期由玩家自己安装
     modApi "me.shedaniel.cloth:cloth-config-fabric:${profile.cloth}"
+
+    // Mod Menu 只提供「配置」按钮的接入点：modCompileOnly = 编译期需要，运行期没有也不影响
+    modCompileOnly "com.terraformersmc:modmenu:${profile.modmenu}"
 }
 
 // 把版本号与目标 MC 范围填进 fabric.mod.json 的占位符
