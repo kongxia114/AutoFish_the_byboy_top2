@@ -54,6 +54,11 @@ public final class AutoFishSettings {
             .setSaveConsumer(AutoFishController::setEnabled)
             .build());
         page.addEntry(entries.startBooleanToggle(
+                Text.literal("浮漂运动检测"), AutoFishController.motionBite())
+            .setDefaultValue(true)
+            .setSaveConsumer(AutoFishController::setMotionBite)
+            .build());
+        page.addEntry(entries.startBooleanToggle(
                 Text.literal("溅水花触发咬钩"), AutoFishController.splashTriggerEnabled())
             .setDefaultValue(true)
             .setSaveConsumer(AutoFishController::setSplashTriggerEnabled)

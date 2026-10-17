@@ -52,13 +52,13 @@ public final class AutoFishHud {
             AutoFishController.barSeenCount(),
             AutoFishController.frameBrightness(),
             AutoFishController.greenHitCount()));
-        Text line2 = Text.literal(String.format("右键 %d · 判定 %d · 预测 %d · 溅水 %d/%d · 预判 %dms · 上次 %s",
+        Text line2 = Text.literal(String.format("右键 %d · 运动 %d · 溅水 %d/%d · 判定 %d · 预测 %d · 上次 %s",
             AutoFishController.reelCount(),
-            AutoFishController.hitDecisionCount(),
-            AutoFishController.predictedHitCount(),
+            AutoFishController.motionReelCount(),
             AutoFishController.splashSeenCount(),
             AutoFishController.splashReelCount(),
-            AutoFishController.leadMs(),
+            AutoFishController.hitDecisionCount(),
+            AutoFishController.predictedHitCount(),
             AutoFishController.lastReelReasonText()));
         // 调「目标颜色 / 颜色容差」时唯一的参照：这一行告诉你指针底下实际读到的是什么色
         int distance = AutoFishController.lastTargetDistancePx();

@@ -204,6 +204,18 @@ public final class AutoFishController {
      * 也避免任何"抛→收→抛"的循环干扰观察。
      */
     private static boolean autoRecast = true;
+    /**
+     * 浮漂运动检测（主判定）：鱼咬钩时浮漂会突然下沉，这是无歧义信号——
+     * 抛竿落水是"从空中落到水面"，咬钩是"在水面往下扎"，两者不会混。
+     * 声音做不到这一点：原版落水和咬钩播的是同一个音效。
+     */
+    private static boolean motionBite = true;
+    /** 咬钩的下沉阈值（格）。原版咬钩约下沉 0.3~0.4，取 0.12 够灵敏又不易误触。 */
+    private static final double BITE_DIP_THRESHOLD = 0.12;
+    /** 上一次采样到的浮漂 Y；NaN = 当前没有浮漂。 */
+    private static double lastHookY = Double.NaN;
+    /** 运动检测触发的收线次数（HUD 诊断用）。 */
+    private static int motionReelCount;
     /** 最近一次由提示自动设定目标色的时刻；0 = 从没自动设过。 */
     private static long autoTargetAtNs;
     /** 提前量最多前探多少像素：速度估计抖动、或指针在端点减速时防止冲过头。 */
@@ -351,7 +363,13 @@ public final class AutoFishController {
             return "无";
         }
         long ms = (System.nanoTime() - lastReelReasonAtNs) / 1_000_000L;
-        return (lastReelReason == 1 ? "溅水" : "色块") + " " + ms + "ms前";
+        String source = switch (lastReelReason) {
+            case 1 -> "溅水";
+            case 2 -> "色块";
+            case 3 -> "运动";
+            default -> "?";
+        };
+        return source + " " + ms + "ms前";
     }
 
     /** 当前是不是正处于浮漂刚出现的宽限期（HUD 用）。 */
@@ -374,6 +392,18 @@ public final class AutoFishController {
 
     public static void setAutoRecast(boolean on) {
         autoRecast = on;
+    }
+
+    public static boolean motionBite() {
+        return motionBite;
+    }
+
+    public static void setMotionBite(boolean on) {
+        motionBite = on;
+    }
+
+    public static int motionReelCount() {
+        return motionReelCount;
     }
 
     public static void setAutoTarget(boolean on) {
@@ -507,6 +537,10 @@ public final class AutoFishController {
         if (recast != null) {
             autoRecast = Boolean.parseBoolean(recast.trim());
         }
+        String motion = props.getProperty("motion_bite");
+        if (motion != null) {
+            motionBite = Boolean.parseBoolean(motion.trim());
+        }
     }
 
     /** 把当前参数写回配置文件；写失败就算了，功能照常，只是不持久化。 */
@@ -525,6 +559,7 @@ public final class AutoFishController {
         props.setProperty("target_tol", String.valueOf(targetTol));
         props.setProperty("auto_target", String.valueOf(autoTarget));
         props.setProperty("auto_recast", String.valueOf(autoRecast));
+        props.setProperty("motion_bite", String.valueOf(motionBite));
         try {
             Files.createDirectories(path.getParent());
             try (OutputStream out = Files.newOutputStream(path)) {
@@ -648,6 +683,56 @@ public final class AutoFishController {
         return hook != null || player.isUsingItem();
     }
 
+    /**
+     * 浮漂运动检测：鱼咬钩时浮漂会突然下沉，这是无歧义信号。
+     *
+     * <p>抛竿时浮漂是**从空中落到水面**，咬钩是**已经在水面又往下扎 0.3~0.4 格**——
+     * 用两次采样的 Y 差值就能分开，不会像声音那样"落水和咬钩同一个音效"。
+     *
+     * <p>落水后的 {@link #CAST_GRACE_NANOS} 内不判定，避免入水那一下的位移被当成咬钩。
+     */
+    private static void checkBobberMotion(MinecraftClient client, PlayerEntity player,
+                                          FishingBobberEntity hook, Hand rodHand, long now) {
+        if (hook == null) {
+            lastHookY = Double.NaN;
+            return;
+        }
+        double y = hook.getY();
+        if (Double.isNaN(lastHookY)) {
+            lastHookY = y;
+            return;
+        }
+        double dip = lastHookY - y; // 正值 = 下沉
+        lastHookY = y;
+        if (dip < BITE_DIP_THRESHOLD) {
+            return;
+        }
+        if (hookAppearAt != 0L && now - hookAppearAt < CAST_GRACE_NANOS) {
+            return;
+        }
+        if (now - lastReelAt < REEL_COOLDOWN_NANOS || !canInteract(player, hook)) {
+            return;
+        }
+        boolean clicked = false;
+        if (player.isUsingItem()) {
+            if (player.getActiveItem().isOf(Items.FISHING_ROD)) {
+                client.interactionManager.stopUsingItem(player);
+                clicked = true;
+            }
+        } else {
+            client.interactionManager.interactItem(player, rodHand);
+            clicked = true;
+        }
+        if (clicked) {
+            lastReelAt = now;
+            nextCastAt = now + recastDelayNanos();
+            reelCount++;
+            motionReelCount++;
+            lastReelReason = 3;
+            lastReelReasonAtNs = now;
+        }
+    }
+
     public static void frame(MinecraftClient client) {
         if (!enabled) {
             return;
@@ -680,6 +765,10 @@ public final class AutoFishController {
             hookAppearAt = 0L;
         } else if (hookAppearAt == 0L) {
             hookAppearAt = now;
+        }
+        // 主判定：浮漂突然下沉 = 鱼咬钩（无歧义，落水与咬钩的位移方向不同）
+        if (motionBite) {
+            checkBobberMotion(client, player, hook, rodHand, now);
         }
         if (splashClickDue(hook != null, true, player.isUsingItem(),
             barCached || now - lastBarSeenAt < SPLASH_BAR_HOLD_NANOS,
