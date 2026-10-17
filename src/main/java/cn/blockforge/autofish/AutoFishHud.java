@@ -46,7 +46,8 @@ public final class AutoFishHud {
 
         Text state = Text.literal("自动钓鱼中");
         Text hint = Text.literal("溅水花自动咬钩 · 指针压绿自动收线 · 按 F8 可设置");
-        Text line1 = Text.literal(String.format("扫描 %d · 见条 %d · 亮度 %d%% · 绿命中 %d",
+        Text line1 = Text.literal(String.format("条 %s · 扫描 %d · 见条 %d · 亮度 %d%% · 绿命中 %d",
+            AutoFishController.barActive() ? "有" : "无",
             AutoFishController.scanCount(),
             AutoFishController.barSeenCount(),
             AutoFishController.frameBrightness(),
@@ -59,10 +60,14 @@ public final class AutoFishHud {
             AutoFishController.splashReelCount(),
             AutoFishController.leadMs()));
         // 调「目标颜色 / 颜色容差」时唯一的参照：这一行告诉你指针底下实际读到的是什么色
-        Text line3 = Text.literal(String.format("中心 %s · 目标 %s · 容差 ±%d",
+        int distance = AutoFishController.lastTargetDistancePx();
+        Text line3 = Text.literal(String.format("中心 %s · 目标 %s %s%s · 色相 ±%d° · 距离 %s",
             hex(AutoFishController.pointerCenterRgb()),
             AutoFishController.targetRgbHex(),
-            AutoFishController.targetTol()));
+            AutoFishController.targetColorName(),
+            AutoFishController.targetFromHint() ? "(提示)" : "",
+            AutoFishController.targetTol(),
+            distance < 0 ? "--" : distance + "px"));
 
         int widest = client.textRenderer.getWidth(state);
         widest = Math.max(widest, client.textRenderer.getWidth(hint));
