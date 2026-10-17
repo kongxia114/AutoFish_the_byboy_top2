@@ -104,6 +104,8 @@ public final class AutoFishController {
     private static final java.util.Random RANDOM = new java.util.Random();
     /** 条体最近仍在屏幕上时不自动重抛，避免在收线/结算动画期间乱按右键。 */
     private static final long RECAST_BAR_HOLD_NANOS = 1_000_000_000L;
+    /** 鱼条在这么久之内出现过才算"还在屏上"；超时即认为小游戏结束。 */
+    private static final long BAR_ACTIVE_NANOS = 1_500_000_000L;
     private static final float MIN_SCALE = 0.8F;
     /** 自定义钓鱼 HUD 可将 256px 贴图放大到全屏宽度附近；截图对应约 8 倍。 */
     private static final float MAX_SCALE = 16.0F;
@@ -188,6 +190,8 @@ public final class AutoFishController {
     private static int targetRgb = 0x34ED53;
     /** 逐通道容差：吃掉同段深浅与缩放插值，又挡住与相邻色相之间的边界混色。 */
     private static int targetTol = 24;
+    /** 提前量最多前探多少像素：速度估计抖动、或指针在端点减速时防止冲过头。 */
+    private static final int MAX_LEAD_PX = 16;
     /** 最近一次读到的指针中心列颜色：调目标色与容差时唯一的参照，HUD 里显示。 */
     private static int pointerCenterRgb;
     /** 最近一次定位到的指针中心列。 */
@@ -195,6 +199,10 @@ public final class AutoFishController {
     private static long pointerSeenNs;
     /** 指针横向速度，单位 像素/毫秒；0 表示还没测出来。 */
     private static double pointerVx;
+    /** 最近一帧的瞬时速度（未平滑）。平滑值在减速时会虚高，用它取较小值兜底。 */
+    private static double pointerVxInstant;
+    /** 最近一次判定时目标色距指针中心多少像素；-1 = 本帧没探到。HUD 调试用。 */
+    private static int lastTargetDistancePx = -1;
     /** 提前量（毫秒）：补偿"读回画面 → 判定 → 点击 → 服务端处理"这条延迟链。 */
     private static int leadMs = 40;
     /** 诊断计数：判定收线的次数 / 其中靠速度外推提前点下的次数。 */
@@ -350,6 +358,11 @@ public final class AutoFishController {
         return pointerCenterRgb;
     }
 
+    /** 最近一次判定时目标色距指针中心的像素数；-1 = 本帧没探到。 */
+    public static int lastTargetDistancePx() {
+        return lastTargetDistancePx;
+    }
+
     public static boolean multiplayerMode() {
         return multiplayerMode;
     }
@@ -472,6 +485,16 @@ public final class AutoFishController {
     }
 
     /** 由 ClientTickEvents.END_CLIENT_TICK 驱动：只负责自动重抛（时序判定，秒级精度够用）。 */
+    /**
+     * 当前屏幕上有没有"活着的"钓鱼条。
+     *
+     * <p>{@link #BAR_ACTIVE_NANOS} 内识别到过条体就算有；超时即认为小游戏已结束。
+     * 原版普通钓鱼根本没有条，本方法恒为 false —— 重抛逻辑正是靠它同时兼容两种场景。
+     */
+    public static boolean barActive() {
+        return lastBarSeenAt != 0L && System.nanoTime() - lastBarSeenAt < BAR_ACTIVE_NANOS;
+    }
+
     public static void tick(MinecraftClient client) {
         if (!enabled) {
             return;
@@ -491,11 +514,13 @@ public final class AutoFishController {
         }
         long now = System.nanoTime();
 
-        // 自动重抛：仅在本会话识别到过条体、且条体已消失 ≥1 秒后才按右键。
-        // 从未识别到条体时一次都不按——避免任何"盲按"打断小游戏判定。
-        if (barSeenCount > 0 && client.currentScreen == null && !player.isUsingItem()
-            && player.fishHook == null && now >= nextCastAt
-            && now - lastBarSeenAt >= RECAST_BAR_HOLD_NANOS) {
+        // 自动重抛：
+        //  · 需要有"本会话在钓鱼"的证据（见过鱼条、或见过溅水花）——避免一进游戏就盲按右键；
+        //  · 只在鱼条不在屏上时抛。所以自定义条的服务器和原版普通钓鱼都能用：
+        //    原版根本没有条，barActive 恒为 false，全程靠溅水花触发收线 + 这里的节奏重抛。
+        if (!barActive() && (barSeenCount > 0 || splashSeenCount > 0)
+            && client.currentScreen == null && !player.isUsingItem()
+            && player.fishHook == null && now >= nextCastAt) {
             client.interactionManager.interactItem(player, rodHand);
             nextCastAt = now + recastDelayNanos();
         }
@@ -513,8 +538,11 @@ public final class AutoFishController {
         if (client.player == null || client.world == null || client.interactionManager == null) {
             return;
         }
-        // 只认 HUD 隐藏；其它界面（钓鱼条可能就是界面画的）照常工作。
-        if (client.options.hudHidden) {
+        // HUD 隐藏、或打开了任何界面时都不读屏：
+        //  · 界面开着不可能钓鱼，读屏纯属浪费；
+        //  · 更关键的是 glReadPixels 是同步阻塞调用，会和 GUI 渲染抢 GPU，
+        //    表现为"打开设置页/背包时卡一下"。这一条把它彻底断掉。
+        if (client.options.hudHidden || client.currentScreen != null) {
             return;
         }
         PlayerEntity player = client.player;
@@ -1052,7 +1080,10 @@ public final class AutoFishController {
             // 超过 200ms 说明中间断过帧（切屏 / 卡顿 / 面板打开），此时速度不可信，重测。
             if (dtMs >= 0.5 && dtMs <= 200.0) {
                 double instant = (x - pointerX) / dtMs;
+                pointerVxInstant = instant;
                 pointerVx = pointerVx * 0.35 + instant * 0.65;
+            } else {
+                pointerVxInstant = pointerVx;
             }
         }
         pointerX = x;
@@ -1079,17 +1110,24 @@ public final class AutoFishController {
         // ① 当前帧：指针中心列
         pointerCenterRgb = pixel(pointerX, gapY, width, height);
         if (isTargetColorAt(pointerX, gapY, width, height)) {
+            lastTargetDistancePx = 0;
             hitDecisionCount++;
             return true;
         }
 
         // ② 提前量：沿速度方向前探
-        if (leadMs <= 0 || pointerVx == 0.0) {
+        lastTargetDistancePx = -1;
+        if (leadMs <= 0) {
             return false;
         }
-        double aheadPx = Math.abs(pointerVx)
-            * (leadMs + (System.nanoTime() - pointerSeenNs) / 1_000_000.0);
-        int steps = (int) Math.round(Math.min(aheadPx, 256.0));
+        // 平滑速度会滞后：加速时偏低、减速时偏高。取「平滑」与「瞬时」的较小值走保守一侧
+        // —— 宁可少探一点（偏晚按），也不要因为速度虚高而提前点空。
+        double speed = Math.min(Math.abs(pointerVx), Math.abs(pointerVxInstant));
+        if (speed <= 0.0) {
+            return false;
+        }
+        double aheadPx = speed * (leadMs + (System.nanoTime() - pointerSeenNs) / 1_000_000.0);
+        int steps = (int) Math.round(Math.min(aheadPx, MAX_LEAD_PX));
         if (steps <= 0) {
             return false;
         }
@@ -1099,7 +1137,10 @@ public final class AutoFishController {
             if (x < runStart || x > runEnd) {
                 break; // 走出条体范围就别再探了
             }
-            if (isTargetColorAt(x, gapY, width, height)) {
+            // 连续两格都是目标色才算：色带交界的混色像素只有一个，靠这条挡掉
+            if (isTargetColorAt(x, gapY, width, height)
+                && isTargetColorAt(x + dir, gapY, width, height)) {
+                lastTargetDistancePx = i;
                 hitDecisionCount++;
                 predictedHitCount++;
                 return true;
