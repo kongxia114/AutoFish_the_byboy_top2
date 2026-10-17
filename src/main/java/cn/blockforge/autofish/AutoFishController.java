@@ -124,6 +124,8 @@ public final class AutoFishController {
     private static long lastBarSeenAt;
     /** 当前这个浮漂是何时第一次被看到的；0 = 现在没有浮漂。用于落水宽限期。 */
     private static long hookAppearAt;
+    /** 上一刻鱼条是否在屏上：用来捕捉"鱼条消失 = 这一竿结束"的边沿。 */
+    private static boolean wasBarActive;
 
     private static ByteBuffer pixels;
     private static int bufferCapacity;
@@ -195,6 +197,12 @@ public final class AutoFishController {
     // -----------------------------------------------------------------------
     /** 目标色（默认取实测的条体绿 #34ED53）：判定只认它，容差 ±targetTol。 */
     private static int targetRgb = 0x34ED53;
+    /** 设置页里手动选/填的目标色，始终保留；提示失效后回落到它。 */
+    private static int manualRgb = 0x34ED53;
+    /** 提示给出的目标色；0 = 当前没有有效提示。 */
+    private static int hintRgb;
+    /** 提示的有效期：超过这么久没有新提示就作废（防止上一竿的颜色一直粘着）。 */
+    private static final long HINT_TTL_NANOS = 15_000_000_000L;
     /** 色相容差（度）：像素色相与调色板里最近色的偏差超过它就不算鱼条颜色。 */
     private static int targetTol = 40;
     /** 自动识别目标色：收到标题/副标题里的颜色提示时自动切换 targetRgb。 */
@@ -418,15 +426,29 @@ public final class AutoFishController {
         if (rgb <= 0) {
             return;
         }
+        hintRgb = rgb & 0xFFFFFF;
         autoTargetAtNs = System.nanoTime();
         if (autoTarget) {
-            targetRgb = rgb & 0xFFFFFF;
+            targetRgb = hintRgb;
         }
     }
 
-    /** 当前目标色是否来自最近的提示（10 秒内）。HUD 用来标注来源。 */
+    /** 当前是否有"有效的提示色"（15 秒内且未被回合结束清掉）。 */
     public static boolean targetFromHint() {
-        return autoTargetAtNs != 0L && System.nanoTime() - autoTargetAtNs < 10_000_000_000L;
+        return hintRgb != 0 && autoTargetAtNs != 0L
+            && System.nanoTime() - autoTargetAtNs < HINT_TTL_NANOS;
+    }
+
+    /**
+     * 清掉提示色、回落到手动值。两处调用：
+     * ① 鱼条消失（这一竿结束）② 提示过期。
+     */
+    public static void clearHint() {
+        hintRgb = 0;
+        autoTargetAtNs = 0L;
+        if (autoTarget) {
+            targetRgb = manualRgb;
+        }
     }
 
     public static int targetRgb() {
@@ -450,10 +472,18 @@ public final class AutoFishController {
         }
         for (int i = 0; i < PALETTE_NAME.length; i++) {
             if (PALETTE_NAME[i].equals(name)) {
-                targetRgb = PALETTE_RGB[i];
+                manualRgb = PALETTE_RGB[i];
+                if (!targetFromHint()) {
+                    targetRgb = manualRgb;
+                }
                 return;
             }
         }
+    }
+
+    /** 手动目标色的 #RRGGBB（存配置用，不受临时提示影响）。 */
+    public static String manualRgbHex() {
+        return String.format("#%06X", manualRgb & 0xFFFFFF);
     }
 
     public static String targetRgbHex() {
@@ -473,7 +503,10 @@ public final class AutoFishController {
             return false;
         }
         try {
-            targetRgb = Integer.parseInt(s, 16) & 0xFFFFFF;
+            manualRgb = Integer.parseInt(s, 16) & 0xFFFFFF;
+            if (!targetFromHint()) {
+                targetRgb = manualRgb;
+            }
             return true;
         } catch (NumberFormatException bad) {
             return false;
@@ -555,7 +588,7 @@ public final class AutoFishController {
         props.setProperty("recast_jitter_percent", String.valueOf(recastJitterPercent));
         props.setProperty("splash_trigger", String.valueOf(splashTriggerEnabled));
         props.setProperty("multiplayer_mode", String.valueOf(multiplayerMode));
-        props.setProperty("target_rgb", targetRgbHex());
+        props.setProperty("target_rgb", manualRgbHex());
         props.setProperty("target_tol", String.valueOf(targetTol));
         props.setProperty("auto_target", String.valueOf(autoTarget));
         props.setProperty("auto_recast", String.valueOf(autoRecast));
@@ -656,6 +689,13 @@ public final class AutoFishController {
         }
         long now = System.nanoTime();
 
+        // 提示色有生命周期：鱼条消失（这一竿结束）或提示过期，都回落手动值。
+        boolean barNow = barActive();
+        if (hintRgb != 0 && ((wasBarActive && !barNow) || !targetFromHint())) {
+            clearHint();
+        }
+        wasBarActive = barNow;
+
         // 自动重抛：仅在本会话识别到过条体、且条体已消失 ≥1 秒后才按右键。
         // 从未识别到条体时一次都不按——避免任何"盲按"打断小游戏判定。
         // （曾经放开过"没有鱼条也重抛"以支持原版普通钓鱼，但那会让"落水声被当成咬钩"
@@ -680,7 +720,7 @@ public final class AutoFishController {
      * 判断依据就是这两条：要么屏上有我们自己的浮漂，要么钓竿正处于使用中。
      */
     private static boolean canInteract(PlayerEntity player, FishingBobberEntity hook) {
-        return hook != null || player.isUsingItem();
+        return hook != null || player.isUsingItem() || barActive();
     }
 
     /**
