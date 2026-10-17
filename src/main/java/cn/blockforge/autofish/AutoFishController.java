@@ -199,6 +199,11 @@ public final class AutoFishController {
     private static int targetTol = 40;
     /** 自动识别目标色：收到标题/副标题里的颜色提示时自动切换 targetRgb。 */
     private static boolean autoTarget = true;
+    /**
+     * 自动重抛开关。关掉后只收线、不抛竿——想单独验证"是不是该收才收"时用，
+     * 也避免任何"抛→收→抛"的循环干扰观察。
+     */
+    private static boolean autoRecast = true;
     /** 最近一次由提示自动设定目标色的时刻；0 = 从没自动设过。 */
     private static long autoTargetAtNs;
     /** 提前量最多前探多少像素：速度估计抖动、或指针在端点减速时防止冲过头。 */
@@ -336,8 +341,39 @@ public final class AutoFishController {
         targetTol = Math.max(10, Math.min(90, tol));
     }
 
+    /** 最近一次收线的触发来源：0=还没收过, 1=溅水花, 2=色块命中。HUD 诊断用。 */
+    private static int lastReelReason;
+    private static long lastReelReasonAtNs;
+
+    /** HUD 用：上次收线的来源与时间，例如「溅水 320ms前」。 */
+    public static String lastReelReasonText() {
+        if (lastReelReason == 0) {
+            return "无";
+        }
+        long ms = (System.nanoTime() - lastReelReasonAtNs) / 1_000_000L;
+        return (lastReelReason == 1 ? "溅水" : "色块") + " " + ms + "ms前";
+    }
+
+    /** 当前是不是正处于浮漂刚出现的宽限期（HUD 用）。 */
+    public static boolean inCastGrace() {
+        return hookAppearAt != 0L && System.nanoTime() - hookAppearAt < CAST_GRACE_NANOS;
+    }
+
+    /** 浮漂出现多久了（毫秒）；0 = 现在没有浮漂。 */
+    public static long hookAgeMs() {
+        return hookAppearAt == 0L ? 0L : (System.nanoTime() - hookAppearAt) / 1_000_000L;
+    }
+
     public static boolean autoTarget() {
         return autoTarget;
+    }
+
+    public static boolean autoRecast() {
+        return autoRecast;
+    }
+
+    public static void setAutoRecast(boolean on) {
+        autoRecast = on;
     }
 
     public static void setAutoTarget(boolean on) {
@@ -467,6 +503,10 @@ public final class AutoFishController {
         if (auto != null) {
             autoTarget = Boolean.parseBoolean(auto.trim());
         }
+        String recast = props.getProperty("auto_recast");
+        if (recast != null) {
+            autoRecast = Boolean.parseBoolean(recast.trim());
+        }
     }
 
     /** 把当前参数写回配置文件；写失败就算了，功能照常，只是不持久化。 */
@@ -484,6 +524,7 @@ public final class AutoFishController {
         props.setProperty("target_rgb", targetRgbHex());
         props.setProperty("target_tol", String.valueOf(targetTol));
         props.setProperty("auto_target", String.valueOf(autoTarget));
+        props.setProperty("auto_recast", String.valueOf(autoRecast));
         try {
             Files.createDirectories(path.getParent());
             try (OutputStream out = Files.newOutputStream(path)) {
@@ -584,7 +625,7 @@ public final class AutoFishController {
         // 从未识别到条体时一次都不按——避免任何"盲按"打断小游戏判定。
         // （曾经放开过"没有鱼条也重抛"以支持原版普通钓鱼，但那会让"落水声被当成咬钩"
         //   变成无限循环：抛→收→抛…，所以撤回，只保留有鱼条的服务器。）
-        if (barSeenCount > 0 && client.currentScreen == null && !player.isUsingItem()
+        if (autoRecast && barSeenCount > 0 && client.currentScreen == null && !player.isUsingItem()
             && player.fishHook == null && now >= nextCastAt
             && now - lastBarSeenAt >= RECAST_BAR_HOLD_NANOS) {
             client.interactionManager.interactItem(player, rodHand);
@@ -636,6 +677,8 @@ public final class AutoFishController {
             now)) {
             client.interactionManager.interactItem(player, rodHand);
             nextCastAt = now + recastDelayNanos();
+            lastReelReason = 1;
+            lastReelReasonAtNs = now;
         }
 
         // 命中绿色段：收线。按住钓竿走原版松开路径，否则走原版按下右键路径。
@@ -654,6 +697,8 @@ public final class AutoFishController {
                 lastReelAt = now;
                 nextCastAt = now + recastDelayNanos();
                 reelCount++;
+                lastReelReason = 2;
+                lastReelReasonAtNs = now;
             }
         }
     }

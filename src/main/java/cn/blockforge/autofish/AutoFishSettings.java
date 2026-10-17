@@ -59,6 +59,11 @@ public final class AutoFishSettings {
             .setSaveConsumer(AutoFishController::setSplashTriggerEnabled)
             .build());
         page.addEntry(entries.startBooleanToggle(
+                Text.literal("自动重抛"), AutoFishController.autoRecast())
+            .setDefaultValue(true)
+            .setSaveConsumer(AutoFishController::setAutoRecast)
+            .build());
+        page.addEntry(entries.startBooleanToggle(
                 Text.literal("多人游戏检测"), AutoFishController.multiplayerMode())
             .setDefaultValue(false)
             .setSaveConsumer(AutoFishController::setMultiplayerMode)
