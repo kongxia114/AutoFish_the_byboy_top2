@@ -66,14 +66,19 @@ public final class AutoFishSettings {
 
         // ---------------- 高级选项：只放精度数值 ----------------
         page.addEntry(entries.startTextDescription(Text.literal("—— 高级选项 ——")).build());
+        page.addEntry(entries.startBooleanToggle(
+                Text.literal("自动识别目标色"), AutoFishController.autoTarget())
+            .setDefaultValue(true)
+            .setSaveConsumer(AutoFishController::setAutoTarget)
+            .build());
         page.addEntry(entries.startStrField(
                 Text.literal("目标颜色（#RRGGBB）"), AutoFishController.targetRgbHex())
             .setDefaultValue("#34ED53")
             .setSaveConsumer(AutoFishController::setTargetRgbHex)
             .build());
         page.addEntry(entries.startIntSlider(
-                Text.literal("颜色容差（±）"), AutoFishController.targetTol(), 0, 80)
-            .setDefaultValue(24)
+                Text.literal("色相容差（度）"), AutoFishController.targetTol(), 10, 90)
+            .setDefaultValue(40)
             .setSaveConsumer(AutoFishController::setTargetTol)
             .build());
         page.addEntry(entries.startIntSlider(
