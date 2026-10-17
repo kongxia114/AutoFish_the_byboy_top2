@@ -1,0 +1,13 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "cn.blockforge.autofish.mixin",
+  "compatibilityLevel": "JAVA_17",
+  "client": [
+    "GameRendererAutoFishMixin",
+    "SoundSystemAutoFishMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
