@@ -71,6 +71,12 @@ public final class AutoFishSettings {
             .setDefaultValue(true)
             .setSaveConsumer(AutoFishController::setAutoTarget)
             .build());
+        page.addEntry(entries.startSelector(
+                Text.literal("手动目标色"), AutoFishController.paletteNames(),
+                AutoFishController.paletteNames()[Math.max(0, AutoFishController.targetPaletteIndex())])
+            .setDefaultValue("绿")
+            .setSaveConsumer(AutoFishController::setTargetPaletteName)
+            .build());
         page.addEntry(entries.startStrField(
                 Text.literal("目标颜色（#RRGGBB）"), AutoFishController.targetRgbHex())
             .setDefaultValue("#34ED53")

@@ -106,6 +106,8 @@ public final class AutoFishController {
     private static final long RECAST_BAR_HOLD_NANOS = 1_000_000_000L;
     /** 鱼条在这么久之内出现过才算"还在屏上"；超时即认为小游戏结束。 */
     private static final long BAR_ACTIVE_NANOS = 1_500_000_000L;
+    /** 最近这么久之内有过钓鱼迹象（见到条 / 听到溅水）才算"还在钓"；超时就不再自动抛竿。 */
+    private static final long ACTIVITY_NANOS = 20_000_000_000L;
     private static final float MIN_SCALE = 0.8F;
     /** 自定义钓鱼 HUD 可将 256px 贴图放大到全屏宽度附近；截图对应约 8 倍。 */
     private static final float MAX_SCALE = 16.0F;
@@ -117,6 +119,8 @@ public final class AutoFishController {
     private static long nextCastAt;
     private static long lastReelAt;
     private static long lastBarSeenAt;
+    /** 最近一次听到「浮漂：溅起水花」的时刻；用于判断"还在钓"。 */
+    private static long lastSplashAt;
 
     private static ByteBuffer pixels;
     private static int bufferCapacity;
@@ -360,6 +364,29 @@ public final class AutoFishController {
         return targetRgb;
     }
 
+    /** 调色板名字表（设置页下拉用；返回副本，避免被外部改）。 */
+    public static String[] paletteNames() {
+        return PALETTE_NAME.clone();
+    }
+
+    /** 当前目标色归到调色板第几个；-1 = 不属于调色板任何一格。 */
+    public static int targetPaletteIndex() {
+        return targetClass();
+    }
+
+    /** 设置页下拉：按名字把目标色设成调色板里的某一格。 */
+    public static void setTargetPaletteName(String name) {
+        if (name == null) {
+            return;
+        }
+        for (int i = 0; i < PALETTE_NAME.length; i++) {
+            if (PALETTE_NAME[i].equals(name)) {
+                targetRgb = PALETTE_RGB[i];
+                return;
+            }
+        }
+    }
+
     public static String targetRgbHex() {
         return String.format("#%06X", targetRgb & 0xFFFFFF);
     }
@@ -550,11 +577,12 @@ public final class AutoFishController {
         }
         long now = System.nanoTime();
 
-        // 自动重抛：
-        //  · 需要有"本会话在钓鱼"的证据（见过鱼条、或见过溅水花）——避免一进游戏就盲按右键；
-        //  · 只在鱼条不在屏上时抛。所以自定义条的服务器和原版普通钓鱼都能用：
-        //    原版根本没有条，barActive 恒为 false，全程靠溅水花触发收线 + 这里的节奏重抛。
-        if (!barActive() && (barSeenCount > 0 || splashSeenCount > 0)
+        // 自动重抛：要求「最近 20 秒内还在钓鱼」（见过条 或 被溅水花咬过），
+        // 而不是「本会话钓过一次鱼」。后者会让"只是拿着钓竿走路"也被不停抛竿，
+        // 表现为"莫名其妙就收杆/抛竿"。
+        boolean recentFishing = (lastBarSeenAt != 0L && now - lastBarSeenAt < ACTIVITY_NANOS)
+            || (lastSplashAt != 0L && now - lastSplashAt < ACTIVITY_NANOS);
+        if (!barActive() && recentFishing
             && client.currentScreen == null && !player.isUsingItem()
             && player.fishHook == null && now >= nextCastAt) {
             client.interactionManager.interactItem(player, rodHand);
@@ -658,6 +686,7 @@ public final class AutoFishController {
         splashY = sound.getY();
         splashZ = sound.getZ();
         splashAtNs = System.nanoTime();
+        lastSplashAt = splashAtNs;
         splashPending = true;
     }
 
@@ -953,6 +982,15 @@ public final class AutoFishController {
         double dzPlayer = splashZ - playerZ;
         double nearestSq = Math.min(dxHook * dxHook + dyHook * dyHook + dzHook * dzHook,
             dxPlayer * dxPlayer + dyPlayer * dyPlayer + dzPlayer * dzPlayer);
+        // 没有自己的浮漂实体时（多人模式），声源必须离玩家很近：
+        // 插件常在玩家处播声，而别人的浮漂不会这么近——这条挡住"别人中鱼我们也按右键"。
+        if (!hasHook && multiplayerMode) {
+            double nearPlayerSq = dxPlayer * dxPlayer + dyPlayer * dyPlayer + dzPlayer * dzPlayer;
+            if (nearPlayerSq > 16.0) {
+                splashPending = false;
+                return false;
+            }
+        }
         double maxDistanceSq = multiplayerMode ? MULTIPLAYER_SPLASH_DISTANCE_SQ : SPLASH_MAX_DISTANCE_SQ;
         if (nearestSq > maxDistanceSq) {
             splashPending = false;
