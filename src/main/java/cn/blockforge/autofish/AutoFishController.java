@@ -104,6 +104,8 @@ public final class AutoFishController {
     private static final java.util.Random RANDOM = new java.util.Random();
     /** 条体最近仍在屏幕上时不自动重抛，避免在收线/结算动画期间乱按右键。 */
     private static final long RECAST_BAR_HOLD_NANOS = 1_000_000_000L;
+    /** 鱼条在这么久之内出现过才算"还在屏上"；超时即认为小游戏结束。 */
+    private static final long BAR_ACTIVE_NANOS = 1_500_000_000L;
     private static final float MIN_SCALE = 0.8F;
     /** 自定义钓鱼 HUD 可将 256px 贴图放大到全屏宽度附近；截图对应约 8 倍。 */
     private static final float MAX_SCALE = 16.0F;
@@ -186,8 +188,14 @@ public final class AutoFishController {
     // -----------------------------------------------------------------------
     /** 目标色（默认取实测的条体绿 #34ED53）：判定只认它，容差 ±targetTol。 */
     private static int targetRgb = 0x34ED53;
-    /** 逐通道容差：吃掉同段深浅与缩放插值，又挡住与相邻色相之间的边界混色。 */
-    private static int targetTol = 24;
+    /** 色相容差（度）：像素色相与调色板里最近色的偏差超过它就不算鱼条颜色。 */
+    private static int targetTol = 40;
+    /** 自动识别目标色：收到标题/副标题里的颜色提示时自动切换 targetRgb。 */
+    private static boolean autoTarget = true;
+    /** 最近一次由提示自动设定目标色的时刻；0 = 从没自动设过。 */
+    private static long autoTargetAtNs;
+    /** 提前量最多前探多少像素：速度估计抖动、或指针在端点减速时防止冲过头。 */
+    private static final int MAX_LEAD_PX = 16;
     /** 最近一次读到的指针中心列颜色：调目标色与容差时唯一的参照，HUD 里显示。 */
     private static int pointerCenterRgb;
     /** 最近一次定位到的指针中心列。 */
@@ -195,6 +203,10 @@ public final class AutoFishController {
     private static long pointerSeenNs;
     /** 指针横向速度，单位 像素/毫秒；0 表示还没测出来。 */
     private static double pointerVx;
+    /** 最近一帧的瞬时速度（未平滑）。平滑值在减速时会虚高，用它取较小值兜底。 */
+    private static double pointerVxInstant;
+    /** 最近一次判定时目标色距指针中心多少像素；-1 = 本帧没探到。HUD 调试用。 */
+    private static int lastTargetDistancePx = -1;
     /** 提前量（毫秒）：补偿"读回画面 → 判定 → 点击 → 服务端处理"这条延迟链。 */
     private static int leadMs = 40;
     /** 诊断计数：判定收线的次数 / 其中靠速度外推提前点下的次数。 */
@@ -312,9 +324,36 @@ public final class AutoFishController {
         return targetTol;
     }
 
-    /** 容差范围 0~80：太小会漏判（同段深浅吃不下），太大容易和相邻色相撞车。 */
+    /** 容差范围 10~90 度：太小会漏判（抗抖动差），太大会把不相干的颜色也收进来。 */
     public static void setTargetTol(int tol) {
-        targetTol = Math.max(0, Math.min(80, tol));
+        targetTol = Math.max(10, Math.min(90, tol));
+    }
+
+    public static boolean autoTarget() {
+        return autoTarget;
+    }
+
+    public static void setAutoTarget(boolean on) {
+        autoTarget = on;
+    }
+
+    /**
+     * 由 {@link TitleWatcher} 调用：服务器提示里识别到目标色时，自动把判定色切过去。
+     * 自动识别关掉时只记录、不生效——手动填的颜色不会被提示覆盖。
+     */
+    public static void onTargetColorHint(int rgb) {
+        if (rgb <= 0) {
+            return;
+        }
+        autoTargetAtNs = System.nanoTime();
+        if (autoTarget) {
+            targetRgb = rgb & 0xFFFFFF;
+        }
+    }
+
+    /** 当前目标色是否来自最近的提示（10 秒内）。HUD 用来标注来源。 */
+    public static boolean targetFromHint() {
+        return autoTargetAtNs != 0L && System.nanoTime() - autoTargetAtNs < 10_000_000_000L;
     }
 
     public static int targetRgb() {
@@ -348,6 +387,11 @@ public final class AutoFishController {
     /** 最近一次读到的指针中心列颜色（0 = 还没读到 / 区域外）。 */
     public static int pointerCenterRgb() {
         return pointerCenterRgb;
+    }
+
+    /** 最近一次判定时目标色距指针中心的像素数；-1 = 本帧没探到。 */
+    public static int lastTargetDistancePx() {
+        return lastTargetDistancePx;
     }
 
     public static boolean multiplayerMode() {
@@ -388,7 +432,11 @@ public final class AutoFishController {
         if (targetHex != null) {
             setTargetRgbHex(targetHex);
         }
-        targetTol = readInt(props, "target_tol", targetTol, 0, 80);
+        targetTol = readInt(props, "target_tol", targetTol, 10, 90);
+        String auto = props.getProperty("auto_target");
+        if (auto != null) {
+            autoTarget = Boolean.parseBoolean(auto.trim());
+        }
     }
 
     /** 把当前参数写回配置文件；写失败就算了，功能照常，只是不持久化。 */
@@ -405,6 +453,7 @@ public final class AutoFishController {
         props.setProperty("multiplayer_mode", String.valueOf(multiplayerMode));
         props.setProperty("target_rgb", targetRgbHex());
         props.setProperty("target_tol", String.valueOf(targetTol));
+        props.setProperty("auto_target", String.valueOf(autoTarget));
         try {
             Files.createDirectories(path.getParent());
             try (OutputStream out = Files.newOutputStream(path)) {
@@ -472,6 +521,16 @@ public final class AutoFishController {
     }
 
     /** 由 ClientTickEvents.END_CLIENT_TICK 驱动：只负责自动重抛（时序判定，秒级精度够用）。 */
+    /**
+     * 当前屏幕上有没有"活着的"钓鱼条。
+     *
+     * <p>{@link #BAR_ACTIVE_NANOS} 内识别到过条体就算有；超时即认为小游戏已结束。
+     * 原版普通钓鱼根本没有条，本方法恒为 false —— 重抛逻辑正是靠它同时兼容两种场景。
+     */
+    public static boolean barActive() {
+        return lastBarSeenAt != 0L && System.nanoTime() - lastBarSeenAt < BAR_ACTIVE_NANOS;
+    }
+
     public static void tick(MinecraftClient client) {
         if (!enabled) {
             return;
@@ -491,11 +550,13 @@ public final class AutoFishController {
         }
         long now = System.nanoTime();
 
-        // 自动重抛：仅在本会话识别到过条体、且条体已消失 ≥1 秒后才按右键。
-        // 从未识别到条体时一次都不按——避免任何"盲按"打断小游戏判定。
-        if (barSeenCount > 0 && client.currentScreen == null && !player.isUsingItem()
-            && player.fishHook == null && now >= nextCastAt
-            && now - lastBarSeenAt >= RECAST_BAR_HOLD_NANOS) {
+        // 自动重抛：
+        //  · 需要有"本会话在钓鱼"的证据（见过鱼条、或见过溅水花）——避免一进游戏就盲按右键；
+        //  · 只在鱼条不在屏上时抛。所以自定义条的服务器和原版普通钓鱼都能用：
+        //    原版根本没有条，barActive 恒为 false，全程靠溅水花触发收线 + 这里的节奏重抛。
+        if (!barActive() && (barSeenCount > 0 || splashSeenCount > 0)
+            && client.currentScreen == null && !player.isUsingItem()
+            && player.fishHook == null && now >= nextCastAt) {
             client.interactionManager.interactItem(player, rodHand);
             nextCastAt = now + recastDelayNanos();
         }
@@ -513,8 +574,11 @@ public final class AutoFishController {
         if (client.player == null || client.world == null || client.interactionManager == null) {
             return;
         }
-        // 只认 HUD 隐藏；其它界面（钓鱼条可能就是界面画的）照常工作。
-        if (client.options.hudHidden) {
+        // HUD 隐藏、或打开了任何界面时都不读屏：
+        //  · 界面开着不可能钓鱼，读屏纯属浪费；
+        //  · 更关键的是 glReadPixels 是同步阻塞调用，会和 GUI 渲染抢 GPU，
+        //    表现为"打开设置页/背包时卡一下"。这一条把它彻底断掉。
+        if (client.options.hudHidden || client.currentScreen != null) {
             return;
         }
         PlayerEntity player = client.player;
@@ -1052,7 +1116,10 @@ public final class AutoFishController {
             // 超过 200ms 说明中间断过帧（切屏 / 卡顿 / 面板打开），此时速度不可信，重测。
             if (dtMs >= 0.5 && dtMs <= 200.0) {
                 double instant = (x - pointerX) / dtMs;
+                pointerVxInstant = instant;
                 pointerVx = pointerVx * 0.35 + instant * 0.65;
+            } else {
+                pointerVxInstant = pointerVx;
             }
         }
         pointerX = x;
@@ -1079,17 +1146,24 @@ public final class AutoFishController {
         // ① 当前帧：指针中心列
         pointerCenterRgb = pixel(pointerX, gapY, width, height);
         if (isTargetColorAt(pointerX, gapY, width, height)) {
+            lastTargetDistancePx = 0;
             hitDecisionCount++;
             return true;
         }
 
         // ② 提前量：沿速度方向前探
-        if (leadMs <= 0 || pointerVx == 0.0) {
+        lastTargetDistancePx = -1;
+        if (leadMs <= 0) {
             return false;
         }
-        double aheadPx = Math.abs(pointerVx)
-            * (leadMs + (System.nanoTime() - pointerSeenNs) / 1_000_000.0);
-        int steps = (int) Math.round(Math.min(aheadPx, 256.0));
+        // 平滑速度会滞后：加速时偏低、减速时偏高。取「平滑」与「瞬时」的较小值走保守一侧
+        // —— 宁可少探一点（偏晚按），也不要因为速度虚高而提前点空。
+        double speed = Math.min(Math.abs(pointerVx), Math.abs(pointerVxInstant));
+        if (speed <= 0.0) {
+            return false;
+        }
+        double aheadPx = speed * (leadMs + (System.nanoTime() - pointerSeenNs) / 1_000_000.0);
+        int steps = (int) Math.round(Math.min(aheadPx, MAX_LEAD_PX));
         if (steps <= 0) {
             return false;
         }
@@ -1099,7 +1173,10 @@ public final class AutoFishController {
             if (x < runStart || x > runEnd) {
                 break; // 走出条体范围就别再探了
             }
-            if (isTargetColorAt(x, gapY, width, height)) {
+            // 连续两格都是目标色才算：色带交界的混色像素只有一个，靠这条挡掉
+            if (isTargetColorAt(x, gapY, width, height)
+                && isTargetColorAt(x + dir, gapY, width, height)) {
+                lastTargetDistancePx = i;
                 hitDecisionCount++;
                 predictedHitCount++;
                 return true;
@@ -1116,21 +1193,108 @@ public final class AutoFishController {
      * 所以必须留容差。实测：同段深浅差 ≤10，与相邻色相的边界混色差 30~50，
      * 相邻色相差 ≥80 —— 取 24 正好吃下前者、挡住后两者。
      */
+    /**
+     * 调色板：取自服务器鱼条的实际取色（用户用取色工具提取）。
+     * 顺序与 {@link #PALETTE_NAME} 对应：橙 / 黄 / 绿 / 青 / 蓝 / 紫。
+     */
+    private static final int[] PALETTE_RGB = {
+        0xFCA248, 0xFCC84B, 0x33EF4F, 0x33EFD2, 0x5182D7, 0xC76BFC,
+    };
+    private static final String[] PALETTE_NAME = {"橙", "黄", "绿", "青", "蓝", "紫"};
+    private static final float[] PALETTE_HUE = new float[PALETTE_RGB.length];
+
+    static {
+        for (int i = 0; i < PALETTE_RGB.length; i++) {
+            PALETTE_HUE[i] = hueOf(PALETTE_RGB[i]);
+        }
+    }
+
+    /** 目标色缓存：色相归类结果随 targetRgb 变化重算，避免每像素都算一遍。 */
+    private static int targetClassCache = -1;
+    private static int targetClassCacheRgb = -1;
+
+    private static int targetClass() {
+        if (targetClassCacheRgb != targetRgb) {
+            targetClassCache = classifyColor(targetRgb);
+            targetClassCacheRgb = targetRgb;
+        }
+        return targetClassCache;
+    }
+
+    /**
+     * 色相角（0~360）。低饱和（灰/白/黑）返回 -1 —— 它们不属于任何色相，
+     * 也就不会被当成鱼条颜色。
+     */
+    private static float hueOf(int rgb) {
+        int r = (rgb >>> 16) & 0xFF;
+        int g = (rgb >>> 8) & 0xFF;
+        int b = rgb & 0xFF;
+        int max = Math.max(r, Math.max(g, b));
+        int min = Math.min(r, Math.min(g, b));
+        int delta = max - min;
+        // 太暗、或饱和度太低（最大值不到最小值的 4 倍跨度）→ 视为无彩色
+        if (max < 40 || delta * 4 < max) {
+            return -1F;
+        }
+        float h;
+        if (max == r) {
+            h = 60F * (((g - b) / (float) delta) % 6F);
+        } else if (max == g) {
+            h = 60F * ((b - r) / (float) delta) + 120F;
+        } else {
+            h = 60F * ((r - g) / (float) delta) + 240F;
+        }
+        return (h + 360F) % 360F;
+    }
+
+    /**
+     * 把一个像素归到调色板里"最近"的那个颜色。
+     *
+     * <p>为什么用就近归类而不是阈值：橙(30°) 与黄(42°) 只差 12.8°，任何"容差"设到
+     * 20° 都会把两者混起来；而就近归类永远只选最近的，不会互相抢。
+     *
+     * <p>同一颜色的亮档 / 暗档色相几乎一致（例如 #FCA248 与 #D78535 都是 30°），
+     * 所以贴图里那两档深浅天然被同一类收下，不需要额外规则。
+     *
+     * @return 调色板下标；不属于任何一种（灰/白/黑/偏差过大）返回 -1
+     */
+    private static int classifyColor(int rgb) {
+        float h = hueOf(rgb);
+        if (h < 0F) {
+            return -1;
+        }
+        int best = -1;
+        float bestDelta = Float.MAX_VALUE;
+        for (int i = 0; i < PALETTE_HUE.length; i++) {
+            float d = Math.abs(h - PALETTE_HUE[i]);
+            if (d > 180F) {
+                d = 360F - d; // 色相是环形的
+            }
+            if (d < bestDelta) {
+                bestDelta = d;
+                best = i;
+            }
+        }
+        return bestDelta <= targetTol ? best : -1;
+    }
+
+    /** 调色板名字（HUD 显示用）；未知返回 "?"。 */
+    public static String paletteName(int index) {
+        return index >= 0 && index < PALETTE_NAME.length ? PALETTE_NAME[index] : "?";
+    }
+
+    /** 当前目标色归到的调色板名字（HUD 显示用）。 */
+    public static String targetColorName() {
+        return paletteName(targetClass());
+    }
+
     private static boolean isTargetColorAt(int x, int gapY, int width, int height) {
         int rgb = pixel(x, gapY, width, height);
         if (rgb == 0) {
             return false; // 读回区域之外
         }
-        int tr = (targetRgb >>> 16) & 0xFF;
-        int tg = (targetRgb >>> 8) & 0xFF;
-        int tb = targetRgb & 0xFF;
-        if (Math.abs(((rgb >>> 16) & 0xFF) - tr) <= targetTol
-            && Math.abs(((rgb >>> 8) & 0xFF) - tg) <= targetTol
-            && Math.abs((rgb & 0xFF) - tb) <= targetTol) {
-            return true;
-        }
-        // 兜底：资源包 / 光影把颜色整体挪走时，退回首色相桶判定（不比原来更差）
-        return bandKind(rgb) == KIND_GREEN;
+        int cls = classifyColor(rgb);
+        return cls >= 0 && cls == targetClass();
     }
 
     /** 5×15 指针贴图逐格匹配：不透明 texel 取格心采样，≥90% 颜色对上才算指针。 */
