@@ -12,6 +12,9 @@
   "entrypoints": {
     "client": [
       "cn.blockforge.autofish.AutoFishMod"
+    ],
+    "modmenu": [
+      "cn.blockforge.autofish.ModMenuIntegration"
     ]
   },
   "mixins": [
@@ -24,6 +27,7 @@
     "fabric-api": "*"
   },
   "recommends": {
-    "cloth-config": "*"
+    "cloth-config": "*",
+    "modmenu": "*"
   }
 }
